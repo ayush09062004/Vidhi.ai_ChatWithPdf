@@ -10,8 +10,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Set up Modellake
-os.environ['GROCLAKE_API_KEY'] = "202cb962ac59075b964b07152d234b70"  # Replace with your Grocklake API key
-os.environ['GROCLAKE_ACCOUNT_ID'] = "2466cc1f4e5446effb7a9250de957141"  # Replace with your Grocklake account ID
+os.environ['GROCLAKE_API_KEY'] = "Your API Key"  # Replace with your Grocklake API key
+os.environ['GROCLAKE_ACCOUNT_ID'] = "Your API Key"  # Replace with your Grocklake account ID
 modellake = ModelLake()
 
 # Function to extract text from a PDF
