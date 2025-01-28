@@ -88,7 +88,7 @@ We welcome contributions to improve Vidhi.ai! If you have any suggestions, bug r
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE] file for more details.
+This project is licensed under the **Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)** license. Please refer to [LICENSE] file.
 
 ## Acknowledgments
 
