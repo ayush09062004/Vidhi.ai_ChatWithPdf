@@ -1,54 +1,58 @@
-import os
-import logging
+# Import necessary libraries
 from duckduckgo_search import DDGS
 from groclake.modellake import ModelLake
-from pypdf import PdfReader  # Use pypdf instead of PyPDF2
+import logging
+import os
+from PyPDF2 import PdfReader
 import gradio as gr
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
 
 # Set up Modellake
 os.environ['GROCLAKE_API_KEY'] = "Your API Key"  # Replace with your Grocklake API key
-os.environ['GROCLAKE_ACCOUNT_ID'] = "Your API Key"  # Replace with your Grocklake account ID
+os.environ['GROCLAKE_ACCOUNT_ID'] = "Your Account Id"  # Replace with your Grocklake account ID
 modellake = ModelLake()
 
-# Function to extract text from a PDF
-def extract_text_from_pdf(pdf_file):
-    """
-    Extract text from a PDF file.
-    """
-    try:
-        reader = PdfReader(pdf_file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-        logger.info("Successfully extracted text from PDF.")
-        return text
-    except Exception as e:
-        logger.error(f"Error reading PDF: {str(e)}")
-        return None
+# Load a pre-trained sentence transformer model for embeddings
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Function to split text into chunks for retrieval
-def split_text_into_chunks(text, chunk_size=500):
-    """
-    Split text into smaller chunks for retrieval.
-    """
-    words = text.split()
-    chunks = [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-    return chunks
+# Initialize FAISS index for vector search
+dimension = 384  # Dimension of the embeddings
+index = faiss.IndexFlatL2(dimension)  # L2 distance for similarity search
 
-# Function to retrieve relevant chunks from the PDF
-def retrieve_relevant_chunks(query, chunks):
+# Dictionary to store text chunks and their corresponding embeddings
+knowledge_base = {}
+
+def load_knowledge_base(pdf_files):
     """
-    Retrieve relevant chunks from the PDF based on the query.
+    Load text from PDF files, split into chunks, and store embeddings in FAISS index.
     """
-    relevant_chunks = []
-    for chunk in chunks:
-        if query.lower() in chunk.lower():  # Basic keyword matching
-            relevant_chunks.append(chunk)
-    return relevant_chunks
+    for pdf_file in pdf_files:
+        try:
+            reader = PdfReader(pdf_file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+            
+            # Split text into smaller chunks (e.g., sentences or paragraphs)
+            chunks = text.split(". ")  # Splitting by sentences for simplicity
+            for chunk in chunks:
+                if chunk.strip():  # Ignore empty chunks
+                    # Generate embedding for the chunk
+                    embedding = embedding_model.encode([chunk])[0]
+                    # Add embedding to FAISS index
+                    index.add(np.array([embedding]))
+                    # Store chunk in knowledge base with its index
+                    knowledge_base[len(knowledge_base)] = {"source": pdf_file, "text": chunk}
+        except Exception as e:
+            print(f"Error reading {pdf_file}: {str(e)}")
+
+# List of PDF files
+pdf_files = ["BNS.pdf", "BNSS.pdf", "BSA.pdf", "COI.pdf"]
+
+# Load knowledge base
+load_knowledge_base(pdf_files)
 
 # DuckDuckGo Search Function
 def duckduckgo_search(query, max_results=3):
@@ -60,213 +64,133 @@ def duckduckgo_search(query, max_results=3):
         results = ddgs.text(query, max_results=max_results)
         return results if results else None
     except Exception as e:
-        logger.error(f"Error during DuckDuckGo search: {str(e)}")
+        print(f"Error during DuckDuckGo search: {str(e)}")
         return None
 
-# Function to summarize the document
-def summarize_document(text):
+# Vector Search in Knowledge Base
+def vector_search_knowledge_base(query, top_k=3):
     """
-    Summarize the document using the LLM.
+    Perform a vector search in the knowledge base for relevant information.
+    """
+    try:
+        # Generate embedding for the query
+        query_embedding = embedding_model.encode([query])[0]
+        # Search FAISS index for the top-k most similar embeddings
+        distances, indices = index.search(np.array([query_embedding]), top_k)
+        # Retrieve the corresponding text chunks
+        results = []
+        for idx in indices[0]:
+            if idx != -1:  # Ignore invalid indices
+                results.append(knowledge_base[idx])
+        return results if results else None
+    except Exception as e:
+        print(f"Error during vector search: {str(e)}")
+        return None
+
+# Summarize Text Function
+def summarize_text(text, max_tokens=500):
+    """
+    Summarize the text to fit within the specified token limit.
+    """
+    sentences = text.split(". ")
+    summarized_text = ". ".join(sentences[:5])  # Adjust the number of sentences as needed
+    return summarized_text[:max_tokens]
+
+# Generate Concise Summary Using Modellake
+def generate_summary(context, query):
+    """
+    Generate a concise summary of the context using Modellake.
     """
     system_prompt = (
-        "You are a legal expert assistant. Very Briefly Explain the following legal document in a concise and informative way in strictly 100-120 words, focusing on key legal concepts, terms, and provisions."
+        "You are a legal assistant having specialization in Indian law. Brief the following context in a very concise manner, retaining all key points relevant to the user's query. Ensure the it is very brief and fits within the token limit."
     )
     chat_completion_request = {
         "groc_account_id": os.environ['GROCLAKE_ACCOUNT_ID'],
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Document: {text}"}
+            {"role": "user", "content": f"Context: {context}\n\nQuery: {query}"}
         ],
         "max_tokens": 500  # Set a token limit for the summary
     }
     try:
         response = modellake.chat_complete(chat_completion_request)
-        logger.info(f"Summary API Response: {response}")
+        print("Summary API Response:", response)  # Debugging: Print the full API response
         if "choices" in response and len(response["choices"]) > 0:
             return response["choices"][0]["message"]["content"]
         elif "answer" in response:
             return response["answer"]
         else:
-            return text[:500]  # Fallback to truncation if summarization fails
+            return context[:500]  # Fallback to truncation if summarization fails
     except Exception as e:
-        logger.error(f"Error generating summary: {str(e)}")
-        return text[:500]  # Fallback to truncation if summarization fails
+        print(f"Error generating summary: {str(e)}")
+        return context[:500]  # Fallback to truncation if summarization fails
 
-# Function to generate answers from web search results
-def generate_answer_from_web_search(query, search_results):
+# Chatbot Function without Chat History
+def chatbot(query):
     """
-    Generate an answer from DuckDuckGo search results using the LLM.
+    Generate a response to the user's query using the knowledge base, DuckDuckGo search results, and Modellake.
     """
-    system_prompt = (
-        "You are a legal expert assistant. Use the following web search results to answer the user's question. Provide a very brief, concise and accurate response based on the information available within 100-120 words."
-    )
-    context = "\n".join([result.get("title", "") + ": " + result.get("body", "") for result in search_results])
-    chat_completion_request = {
-        "groc_account_id": os.environ['GROCLAKE_ACCOUNT_ID'],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Question: {query}\n\nContext: {context}"}
-        ],
-        "max_tokens": 500  # Set a token limit for the response
-    }
     try:
-        response = modellake.chat_complete(chat_completion_request)
-        logger.info(f"Web Search Answer API Response: {response}")
-        if "choices" in response and len(response["choices"]) > 0:
-            return response["choices"][0]["message"]["content"]
-        elif "answer" in response:
-            return response["answer"]
+        # Search the knowledge base first using vector search
+        kb_results = vector_search_knowledge_base(query)
+        if kb_results:
+            context = "\n".join([result["text"] for result in kb_results])
         else:
-            return "Unable to generate a response from web search results."
-    except Exception as e:
-        logger.error(f"Error generating answer from web search: {str(e)}")
-        return "Unable to generate a response from web search results."
+            # Fall back to DuckDuckGo search
+            search_results = duckduckgo_search(query)
+            if not search_results:
+                return "I couldn't find any relevant information. Please try rephrasing your query."
+            # Combine search results into a single context (with a limit)
+            max_context_length = 500  # Adjust based on token limit
+            context = "\n".join([result["body"][:200] for result in search_results])[:max_context_length]
 
-# Function to handle PDF upload and generate summary
-def handle_pdf_upload(pdf_file):
-    """
-    Handle PDF upload and generate a summary.
-    """
-    if pdf_file is None:
-        return "Please upload a PDF file first."
+        # Generate a concise summary of the context
+        summarized_context = generate_summary(context, query)
 
-    pdf_text = extract_text_from_pdf(pdf_file)
-    if not pdf_text:
-        return "Error: Unable to extract text from the uploaded PDF."
-
-    summary = summarize_document(pdf_text)
-    return f"Here's a summary of the document:\n\n{summary}"
-
-# Function to handle user questions
-def handle_user_question(pdf_file, query):
-    """
-    Handle user questions about the uploaded PDF.
-    """
-    if pdf_file is None:
-        return "Please upload a PDF file first."
-
-    pdf_text = extract_text_from_pdf(pdf_file)
-    if not pdf_text:
-        return "Error: Unable to extract text from the uploaded PDF."
-
-    # Split text into chunks for retrieval
-    chunks = split_text_into_chunks(pdf_text)
-
-    # Retrieve relevant chunks based on the query
-    relevant_chunks = retrieve_relevant_chunks(query, chunks)
-
-    # Augment with LLM to generate a response
-    if relevant_chunks:
-        context = "\n".join(relevant_chunks)
+        # Use Modellake for response generation
         system_prompt = (
-            "You are a legal expert assistant having specialization in Indian laws. Answer the user's question in Indian context only based on the provided legal document in 100-120 words. It should be concise in such a manner that you don't miss out any key details. "
-            "If the document does not contain the answer, say 'I don't know'."
+            "You are a legal assistant having specialization in Indian law. Provide brief, accurate and concise legal advice without missing any key detail in strictly 100-120 words. Focus only on Indian laws, rules, and regulations. Ensure your responses are brief, to the point, and do not truncate any key details. Note: The Indian Penal Code (IPC) has been replaced by the Bharatiya Nyaya Sanhita (BNS), the Code of Criminal Procedure (CrPC) by the Bharatiya Nagrik Suraksha Sanhita (BNSS), and the Indian Evidence Act by the Bharatiya Sakshya Adhiniyam (BSA)."
         )
+
         chat_completion_request = {
             "groc_account_id": os.environ['GROCLAKE_ACCOUNT_ID'],
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Document: {context}\n\nQuestion: {query}"}
+                {"role": "user", "content": f"Context: {summarized_context}\n\nQuestion: {query}"}
             ],
             "max_tokens": 4086  # Set the max tokens for the response
         }
 
-        # Get the LLM's response
         response = modellake.chat_complete(chat_completion_request)
-        logger.info(f"LLM Response: {response}")
-
+        print("Chat API Response:", response)  # Debugging: Print the full API response
         if "choices" in response and len(response["choices"]) > 0:
-            llm_answer = response["choices"][0]["message"]["content"]
+            full_response = response["choices"][0]["message"]["content"]
         elif "answer" in response:
-            llm_answer = response["answer"]
+            full_response = response["answer"]
         else:
-            llm_answer = "Unable to generate a response."
+            full_response = "Unable to generate a complete response."
 
-        # If the LLM doesn't know, fallback to DuckDuckGo search
-        if "I don't know" in llm_answer or "Unable to generate" in llm_answer:
-            search_results = duckduckgo_search(query)
-            if not search_results:
-                return "I couldn't find any relevant information in the PDF or online. Please try rephrasing your query."
-
-            # Generate an answer from web search results
-            web_answer = generate_answer_from_web_search(query, search_results)
-            return f"{web_answer}"
-        else:
-            return llm_answer
-    else:
-        # If no relevant chunks are found, perform a DuckDuckGo search
-        search_results = duckduckgo_search(query)
-        if not search_results:
-            return "I couldn't find any relevant information in the PDF or online. Please try rephrasing your query."
-
-        # Generate an answer from web search results
-        web_answer = generate_answer_from_web_search(query, search_results)
-        return f"{web_answer}"
+        return full_response
+    except Exception as e:
+        print(f"Error in chatbot function: {str(e)}")  # Debugging: Print the error
+        return f"Error generating response: {str(e)}"
 
 # Gradio Chat Interface
-def gradio_chat_interface(pdf_file, query, chat_history):
+def gradio_chatbot(query, chat_history):
     """
-    Gradio chat interface function to handle PDF upload and chat.
+    Gradio chatbot function that ignores chat history and treats each query independently.
     """
-    if pdf_file is not None and (chat_history is None or len(chat_history) == 0):
-        # Automatically generate a summary when the PDF is uploaded
-        summary = handle_pdf_upload(pdf_file)
-        chat_history.append(("System", summary))
-        chat_history.append(("System", "You can now ask questions about the document."))
-        return chat_history, ""  # Clear the query input box
+    response = chatbot(query)
+    return response
 
-    if query is not None and query.strip() != "":
-        # Handle user questions
-        response = handle_user_question(pdf_file, query)
-        chat_history.append(("User", query))
-        chat_history.append(("System", response))
-        return chat_history, ""  # Clear the query input box
+# Create Gradio Chat Interface
+iface = gr.ChatInterface(
+    fn=gradio_chatbot,
+    title="Vidhi.ai: Indian Legal Assistance Agent",
+    description="Ask any legal question related to Indian law, and I'll try to provide concise advice.",
+    chatbot=gr.Chatbot(height=400)  # Adjust height as needed
+)
 
-    return chat_history, ""  # Clear the query input box
-
-# Main function to launch the Gradio app
-def main():
-    # Create Gradio chat interface
-    with gr.Blocks() as demo:
-        # PDF upload component
-        pdf_file = gr.File(label="Upload PDF File")
-
-        # Chatbot component
-        chatbot = gr.Chatbot(label="Chat with Your Legal PDF")
-
-        # Textbox for user questions
-        query = gr.Textbox(label="Ask a Question About the PDF", placeholder="Type your question here...")
-
-        # Chat history state
-        chat_history = gr.State([])
-
-        # Submit button
-        submit_button = gr.Button("Submit")
-
-        # Define the interaction
-        submit_button.click(
-            gradio_chat_interface,
-            inputs=[pdf_file, query, chat_history],
-            outputs=[chatbot, query]
-        )
-
-        # Enable Enter key to submit
-        query.submit(
-            gradio_chat_interface,
-            inputs=[pdf_file, query, chat_history],
-            outputs=[chatbot, query]
-        )
-
-        # Automatically trigger summary generation when a PDF is uploaded
-        pdf_file.change(
-            gradio_chat_interface,
-            inputs=[pdf_file, query, chat_history],
-            outputs=[chatbot, query]
-        )
-
-    # Launch Gradio app
-    demo.launch(share=True)
-
-# Entry point for Hugging Face Spaces
+# Launch the Gradio Interface
 if __name__ == "__main__":
-    main()
+    iface.launch(share=True)
